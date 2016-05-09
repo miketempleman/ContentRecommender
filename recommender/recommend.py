@@ -19,9 +19,12 @@ import config
 from bson import json_util
 import json
 
+#from nltk.corpus import stopwords
+
 from datetime import datetime, date, time, timedelta
 import itertools as it
 
+SIMPLESTOPS=['RT', 'QT', 'MT']
 
 class ContentRecommend(object):
     create_date = datetime.utcnow()
@@ -46,6 +49,7 @@ class ContentRecommend(object):
         self.missionId = mission_id
         config.LOGGER.info('Instantiation recommender')
         self.connect(db_name, self.missionId, db_port=db_port, db_host=db_host)
+        config.LOGGER.debug("Loading NLTK stopword list for English")
 
     def connect(self, db_name="plover_development", mission_id="", db_port=27017, db_host='localhost'):
         config.LOGGER.info('Instantiating recommender object for mission %s', mission_id)
@@ -58,7 +62,7 @@ class ContentRecommend(object):
             self.account = self.db.linkedAccount.find_one({'_id': profile['account']})
             if self.account is None:
                 config.LOGGER.debug('No such account id')
-            self.setup_training()
+            self.setup_training(days=30)
         except Exception as ex:
             config.LOGGER.error("Error %s opening mission _id=%s", ex.message, self.missionId)
 
@@ -76,7 +80,7 @@ class ContentRecommend(object):
                 updates = self.db.statusUpdate.find(conditions, projection).sort('postTime', pymongo.DESCENDING).limit(maximum)
                 for tw in updates:
                     if 'quotedStatus' in tw:
-                        tw['text'] += " QT: " + tw['quotedStatus']['text']
+                        tw['text'] += " QT " + tw['quotedStatus']['text']
                         for keyword in tw['quotedStatus']['keywords']:
                             tw['keywords'].append(keyword)
                     smu = self.db.socialMediaUser.find_one({'_id': tw['sender']}, {'screenNameLC': 1})
@@ -134,19 +138,21 @@ class ContentRecommend(object):
         try:
             start = end_time - timedelta(minutes=days*24*60)
             condition = {'missions': ObjectId(self.missionId), '$or': [{'favorited': True}, {'sentByMe': True}],
-                        'postTime': {'$gt': start, '$lte': end_time}}
-            self.training_docs = self.get_updates(conditions=condition, maximum=1000)
+                        'postTime': {'$gt': start, '$lte': end_time},
+                         '$nor':[{'keywords':{'$exists':False}},{'keywords':{'$size':1}},{'keywords':{'$size':2}}]}
+            self.training_docs = self.get_updates(conditions=condition, maximum=10000)
             config.LOGGER.info('Train model for %s', self.account['profile']['preferredUsername'])
-            if len(self.training_docs) > 25:
+            if len(self.training_docs) > 50:
                 config.LOGGER.debug('Found %d updates for training from %s', len(self.training_docs),
                                     self.account['profile']['preferredUsername'])
                 self.training_end = end_time
                 self.days = days
 
-                trainingTokenized = [' '.join(doc['keywords']) for doc in self.training_docs]
-                self.vectorizer = TfidfVectorizer(max_df=0.9, min_df=2, max_features=500, use_idf=True,
-                                                  strip_accents='ascii')
-                X = self.vectorizer.fit_transform(trainingTokenized)
+                trainingRaw = [' '.join(doc['keywords']) for doc in self.training_docs]
+                #trainingRaw = [tw['text'] for tw in self.training_docs]
+                self.vectorizer = TfidfVectorizer(max_df=0.6, min_df=2, max_features=500, use_idf=True,
+                                                  strip_accents='ascii', )
+                X = self.vectorizer.fit_transform(trainingRaw)
                 if X.shape[1] <= self.n_components:
                     self.n_components = X.shape[1] - 1
                 config.LOGGER.debug('%d components found for  SVD', self.n_components)
@@ -214,7 +220,6 @@ class ContentRecommend(object):
 
     def find_recommendations(self, tweets=[], top=10, quality=.1, min_examples=1):
 
-        working_size = top * 2
         working_list = []
         result_list = []
         try:
@@ -225,8 +230,10 @@ class ContentRecommend(object):
                     config.LOGGER.debug("Too few tweets passed for recommendation")
                     return []
 
-                tokenized_tweets = [' '.join(doc['keywords']) for doc in tweets]
-                Y = self.vectorizer.transform(tokenized_tweets)
+                #tokenized_tweets = [' '.join(doc['newKeys']) for doc in tweets]
+                #tweetText = [tw['text'] for tw in tweets]
+                tweetText = [' '.join(tw['keywords']) for tw in tweets]
+                Y = self.vectorizer.transform(tweetText)
                 svdY = self.svd.transform(Y)
                 svdY = self.normalizer.transform(svdY)
                 y_transform = self.k_means.transform(svdY)
@@ -287,8 +294,9 @@ class ContentRecommend(object):
             if self.svd is not None:
                 start = end_time - timedelta(minutes=minutes_prior)
                 condition = {'missions': ObjectId(self.missionId), '$or': [{'favorited': False}, {'sentByMe': False}, {'mentionsMe' : False},{'retweetOfMe':False}],
-                            'postTime': {'$gt': start, '$lte': end_time}}
-                tweets = self.get_updates(maximum=1000, conditions=condition)
+                            'postTime': {'$gt': start, '$lte': end_time},
+                              '$nor':[{'keywords':{'$exists':False}},{'keywords':{'$size':1}},{'keywords':{'$size':2}}]}
+                tweets = self.get_updates(maximum=10000, conditions=condition)
                 config.LOGGER.debug('%d updates from account timeline read from database', len(tweets))
                 results = self.find_recommendations(tweets, top=top, quality=quality, min_examples=min_examples)
                 config.LOGGER.debug('%d recommendations found for mission %s', len(tweets), self.missionId)

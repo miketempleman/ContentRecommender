@@ -9,6 +9,7 @@ from recommend import ContentRecommend
 from dateutil import parser as dateparser
 from datetime import datetime, timedelta
 from bson import json_util
+import resource
 
 import argparse
 
@@ -17,9 +18,10 @@ import argparse
 # LOGGER = logging.getLogger(__name__)
 
 
-#{"recommend":"CONTENT", "example-quality":0.05, "example-count-min":3, "max":5, "missions":["5345ce62744e47ff0b4ed89a", "54449b97e4b08d74189d0afe", "544499dae4b08d74189d003b"]}
+#{"recommend":"CONTENT", "example-quality":0.15, "example-count-min":2, "max":5, "missions":["5444a80ae4b01939bbf69f3c","5345ce62744e47ff0b4ed89a", "54449b97e4b08d74189d0afe", "544499dae4b08d74189d003b"]}
 
 #{"recommend":"REBUILD", "missions":["5345ce62744e47ff0b4ed89a", "54449b97e4b08d74189d0afe", "544499dae4b08d74189d003b"]}
+recommenders = {}
 
 def content_recommend(message_object):
 
@@ -55,7 +57,6 @@ def check_recommender(mission_id):
     else:
         rebuild_recommender(mission_id)
 
-
 def rebuild_recommender(mission_id):
     try:
         if mission_id in recommenders:
@@ -70,6 +71,8 @@ def rebuild_recommender(mission_id):
 
 
 def recommend_service(body):
+    global recommenders
+    global args
     try:
         config.LOGGER.info("Servicing recommender request")
         message_object = json.loads(body)
@@ -83,6 +86,16 @@ def recommend_service(body):
         else:
             config.LOGGER.error("%s is invalid recommend command ", message_object['recommend'])
 
+        mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        maxmem = args.maxmem
+        config.LOGGER.debug("Memory used is %d", mem)
+        if mem > maxmem or args.nocache:
+            keys = recommenders.keys()
+            for key in keys:
+                val = recommenders.pop(key)
+                del val
+
+
     except Exception as ex:
        config.LOGGER.error("Exception %s processing message body %s", ex.message, body)
 
@@ -95,13 +108,13 @@ def main():
     global publisher
     global args
 
-    recommenders = {}
 
     try:
         config.LOGGER.info("Beginning recommender loop")
         consumer = RabbitConsumer(queue='recommend', exchange='plover', client=recommend_service, routing_key='recommend.#', host=args.rabbitserver, user=args.rabbituser, pwd=args.rabbitpwd)
         publisher = RabbitPublisher(exchange='plover', host=args.rabbitserver, user=args.rabbituser, pwd=args.rabbitpwd)
 
+        config.LOGGER.debug("Memory current level %d", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         consumer.run()
     except KeyboardInterrupt:
         consumer.stop()
@@ -127,6 +140,8 @@ if __name__ == '__main__':
     parser.add_argument('-thd', '--threads', default=1, help='Number of processes to spawn. Default=1')
     parser.add_argument('-exp', '--expiration', default=12, help='Hours until the content training expires')
     parser.add_argument('-noauto', '--noauto', default=False, help='Hours until the content training expires')
+    parser.add_argument('-maxmem','--maxmem', type=int, default=200, help='Maximum memory size (in MB) before flushing cache')
+    parser.add_argument('-nocache','--nocache', default=False, help='Do not employ a cache to save training')
 
     parser.parse_args(namespace=args)
     config.init_logging(log_level=args.loglevel, logfile=args.logfile)
@@ -144,5 +159,8 @@ if __name__ == '__main__':
     print '  logging level: %s' % args.loglevel
     print '  logging file: %s' % args.logfile
     print '  threads: %d' % args.threads
+    print '  Max memory (MB) allowed: %d' % args.maxmem
+    args.maxmem = args.maxmem * 2**20
+    print '  Cache disabled: %s' % args.nocache
 
     main()
