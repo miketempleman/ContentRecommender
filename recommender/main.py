@@ -122,7 +122,8 @@ def main():
     else:
         config.LOGGER.error("Exception in running recommender")
 
-
+def on_callback(msg):
+    print msg
 
 if __name__ == '__main__':
     args = Args()
